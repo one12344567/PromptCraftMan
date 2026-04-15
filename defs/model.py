@@ -10,6 +10,7 @@ class DiagnosisReport(BaseModel):
 
 class ClarificationReport(BaseModel):
     questions : list[str] = Field(description="The list of questions to clarify")
+    answers: list[str] = Field(description="The list of answers to the questions", default_factory=list)
     
 class OptimizationReport(BaseModel):
     prompts : list[str] = Field(description="The list of prompts have optimized")
