@@ -10,6 +10,7 @@ class DiagnosisReport(BaseModel):
 
 class ClarificationReport(BaseModel):
     questions : list[str] = Field(description="The list of questions to clarify")
+    answers: list[str] = Field(description="The list of answers to the questions", default_factory=list)
     
 class OptimizationReport(BaseModel):
     prompts : list[str] = Field(description="The list of prompts have optimized")
@@ -19,11 +20,12 @@ class OptimizationReport(BaseModel):
 class EvaluationReport(BaseModel):
     grades : list[float] = Field(description="The list of grades of the prompts")
     reason: str = Field(description="The reason to rewrite the prompt")
-    next_step: Literal["diagnosis" ,"optimization"]
+    next_step: Literal["diagnosis" ,"optimization" ,"finalize"]
     
 class QAReport(BaseModel):
     question: str = Field(description="The question to answer")
     answer: str = Field(description="The answer to the question")
+    
 class WorkFlowStateModel(BaseModel):
     original_prompt: str = Field(description="The original prompt")
     
