@@ -55,5 +55,5 @@ class ClarificationAgent:
         return self.agent.invoke({"messages":prompt})
     
 if __name__ == "__main__":
-    diagnosis_agent = ClarificationAgent()
-    print(diagnosis_agent.invoke(msg))
+    clarification_agent = ClarificationAgent()
+    print(clarification_agent.invoke(msg))

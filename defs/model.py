@@ -20,7 +20,7 @@ class OptimizationReport(BaseModel):
 class EvaluationReport(BaseModel):
     grades : list[float] = Field(description="The list of grades of the prompts")
     reason: str = Field(description="The reason to rewrite the prompt")
-    next_step: Literal["diagnosis" ,"optimization"]
+    next_step: Literal["diagnosis" ,"optimization" ,"finalize"]
     
 class QAReport(BaseModel):
     question: str = Field(description="The question to answer")
