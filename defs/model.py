@@ -1,6 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
+
+WorkflowStep = Literal["diagnosis", "clarification", "optimization", "evaluation", "finalize"]
 
 class DiagnosisReport(BaseModel):
     scene: str = Field(description="The scene of the use of the prompt")
@@ -27,6 +29,9 @@ class QAReport(BaseModel):
     answer: str = Field(description="The answer to the question")
     
 class WorkFlowStateModel(BaseModel):
+    current_step: WorkflowStep = Field(description="The current step of the workflow")
+    next_step: WorkflowStep = Field(description="The next step of the workflow")
+    
     original_prompt: str = Field(description="The original prompt")
     
     problems: list[str] = Field(description="The list of problems to diagnose", default_factory=list)
@@ -34,6 +39,9 @@ class WorkFlowStateModel(BaseModel):
     QA: list[QAReport] = Field(description="The list of questions and answers", default_factory=list)
     
     improved_info: list[str] = Field(description="The list of improved information", default_factory=list)
+    
+    grades: list[float] = Field(description="The list of evaluation grades for optimized prompts", default_factory=list)
+    evaluation_reason: str = Field(description="The reason for the evaluation decision", default="")
     
     final_prompt: str = Field(description="The final prompt after all steps")
     final_missing_info: list[str] = Field(description="The list of missing information after all steps", default_factory=list)
