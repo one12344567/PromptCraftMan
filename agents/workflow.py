@@ -48,32 +48,52 @@ system_prompt = """
 """.strip()
 
 
+def _dump_structured_response(result: dict, include: set[str]) -> str:
+    structured_response = result["structured_response"]
+    return structured_response.model_dump_json(
+        include=include,
+        ensure_ascii=False,
+    )
+
+
 @tool
 def run_diagnosis_agent(prompt: str):
     """Diagnose the original prompt and return scene, problems, missing info, and next step."""
     diagnosis_agent = DiagnosisAgent()
-    return str(diagnosis_agent.invoke(prompt))
+    return _dump_structured_response(
+        diagnosis_agent.invoke(prompt),
+        {"problems", "missing_info", "next_step"},
+    )
 
 
 @tool
 def run_clarification_agent(prompt: str):
     """Generate clarification questions or collect clarification answers from missing information."""
     clarification_agent = ClarificationAgent()
-    return str(clarification_agent.invoke(prompt))
+    return _dump_structured_response(
+        clarification_agent.invoke(prompt),
+        {"questions"},
+    )
 
 
 @tool
 def run_optimization_agent(prompt: str):
     """Optimize the prompt based on the original prompt and clarified information."""
     optimization_agent = OptimizationAgent()
-    return str(optimization_agent.invoke(prompt))
+    return _dump_structured_response(
+        optimization_agent.invoke(prompt),
+        {"prompts", "improved_info"},
+    )
 
 
 @tool
 def run_evaluation_agent(prompt: str):
     """Evaluate optimized prompts and decide whether to diagnose, optimize again, or finalize."""
     evaluation_agent = EvaluationAgent()
-    return str(evaluation_agent.invoke(prompt))
+    return _dump_structured_response(
+        evaluation_agent.invoke(prompt),
+        {"grades", "reason", "next_step"},
+    )
 
 
 tools = [
