@@ -2,7 +2,7 @@ from langchain.agents import create_agent
 from llm.myllm import llm
 from defs.model import OptimizationReport,WorkFlowStateModel
 from langchain.tools import tool
-
+from agents.mytools.mytools import baidu_search_tool
 
 
 

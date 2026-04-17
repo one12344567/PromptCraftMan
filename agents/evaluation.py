@@ -2,7 +2,7 @@ from langchain.agents import create_agent
 from llm.myllm import llm
 from defs.model import EvaluationReport,WorkFlowStateModel
 from langchain.tools import tool
-
+from agents.mytools.mytools import baidu_search_tool
 
 
 
@@ -19,7 +19,7 @@ system_prompt="""
 
 """.strip()
 
-tools=[]
+tools=[baidu_search_tool]
 schema=EvaluationReport
 name="evaluation_agent"
 

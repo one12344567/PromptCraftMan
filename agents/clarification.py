@@ -2,6 +2,7 @@ from langchain.agents import create_agent
 from llm.myllm import llm
 from defs.model import ClarificationReport,WorkFlowStateModel
 from langchain.tools import tool
+from agents.mytools.mytools import baidu_search_tool
 
 @tool
 def get_info(info: str) -> str:
@@ -20,7 +21,7 @@ system_prompt="""
 你是prompt优化助手的子模块，你的任务是根据上一模块输出的missing_info，向用户提问，补全信息，输出补全后的信息。
 """.strip()
 
-tools=[get_info]
+tools=[get_info,baidu_search_tool]
 schema=ClarificationReport
 name="clarification_agent"
 

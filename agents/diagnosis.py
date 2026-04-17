@@ -3,6 +3,7 @@ from langchain.tools import tool
 
 from llm.myllm import llm
 from defs.model import DiagnosisReport,WorkFlowStateModel
+from agents.mytools.mytools import baidu_search_tool
 
 #参数导入，暂时没写相关模块，占个位置
 
@@ -14,7 +15,7 @@ system_prompt="""
     next_step: Literal["clarification",  "optimization"]
 """.strip()
 
-tools=[]
+tools=[baidu_search_tool]
 schema=DiagnosisReport
 name="diagnosis_agent"
 
