@@ -1,10 +1,72 @@
 import json
+import shutil
+import sys
 
 from agents.clarification import ClarificationAgent
 from agents.diagnosis import DiagnosisAgent
 from agents.evaluation import EvaluationAgent
 from agents.optimization import OptimizationAgent
 from defs.model import QAReport, WorkFlowStateModel
+
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+MAGENTA = "\033[35m"
+BLUE = "\033[34m"
+
+
+def _supports_color() -> bool:
+    return sys.stdout.isatty()
+
+
+def _style(text: str, *codes: str) -> str:
+    if not _supports_color():
+        return text
+    return f"{''.join(codes)}{text}{RESET}"
+
+
+def _term_width(default: int = 72) -> int:
+    try:
+        return max(60, min(100, shutil.get_terminal_size((default, 20)).columns))
+    except OSError:
+        return default
+
+
+def _rule(char: str = "─") -> str:
+    return char * _term_width()
+
+
+def _print_header(title: str, subtitle: str | None = None) -> None:
+    print(_style(_rule("═"), CYAN, BOLD))
+    print(_style(title.center(_term_width()), CYAN, BOLD))
+    if subtitle:
+        print(_style(subtitle.center(_term_width()), DIM))
+    print(_style(_rule("═"), CYAN, BOLD))
+
+
+def _print_stage(title: str, tone: str = MAGENTA) -> None:
+    print()
+    print(_style(f"◆ {title}", tone, BOLD))
+    print(_style(_rule("─"), DIM))
+
+
+def _print_kv(label: str, value: str) -> None:
+    print(f"{_style(label, BOLD)} {value}")
+
+
+def _print_panel(title: str, body: str, tone: str = BLUE) -> None:
+    width = _term_width()
+    print(_style(f"┌{'─' * (width - 2)}┐", tone))
+    print(_style(f"│ {title}".ljust(width - 1) + "│", tone, BOLD))
+    print(_style(f"├{'─' * (width - 2)}┤", tone))
+    for line in (body or "").splitlines() or [""]:
+        visible = line[: width - 4]
+        print(_style(f"│ {visible}".ljust(width - 1) + "│", tone))
+    print(_style(f"└{'─' * (width - 2)}┘", tone))
 
 
 def _extract_structured_response(result: dict):
@@ -50,17 +112,63 @@ def _build_fallback_final_prompt(original_prompt: str, missing_info: list[str]) 
 
 
 def _collect_answers_once(questions: list[str]) -> tuple[list[QAReport], list[str]]:
+    _print_stage("信息澄清", YELLOW)
     print("需要补充以下信息：")
     for index, question in enumerate(questions, start=1):
         print(f"{index}. {question}")
 
-    print("\n请直接用一段话补充你已知的信息，workflow 会自动识别并继续处理。")
-    user_context = input("请输入补充说明：").strip()
+    print()
+    print("请直接用一段话补充你已知的信息，workflow 会自动识别并继续处理。")
+    user_context = input(_style("请输入补充说明： ", YELLOW, BOLD)).strip()
     if not user_context:
         return [], questions
 
     qa_records = [QAReport(question=question, answer=user_context) for question in questions]
     return qa_records, []
+
+
+def _format_list(items: list[str]) -> str:
+    if not items:
+        return "无"
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _format_qa(qa_items: list[QAReport]) -> str:
+    if not qa_items:
+        return "无"
+    lines: list[str] = []
+    for index, item in enumerate(qa_items, start=1):
+        lines.append(f"{index}. 问题：{item.question}")
+        lines.append(f"   回答：{item.answer}")
+    return "\n".join(lines)
+
+
+def format_workflow_result(state: WorkFlowStateModel) -> str:
+    grade_text = "未评估" if state.grade is None else str(state.grade)
+    sections = [
+        ("当前步骤", state.current_step),
+        ("下一步", state.next_step),
+        ("评分", grade_text),
+        ("评估说明", state.evaluation_reason or "无"),
+        ("原始提示词", state.original_prompt),
+        ("诊断问题", _format_list(state.problems)),
+        ("缺失信息", _format_list(state.missing_info)),
+        ("补充问答", _format_qa(state.QA)),
+        ("优化补强点", _format_list(state.improved_info)),
+        ("候选提示词", state.candidate_prompt or "无"),
+        ("最终提示词", state.final_prompt),
+        ("最终仍缺失的信息", _format_list(state.final_missing_info)),
+    ]
+    blocks = [
+        "==============================",
+        "PromptCraftMan 处理结果",
+        "==============================",
+    ]
+    for title, content in sections:
+        blocks.append(f"【{title}】")
+        blocks.append(content)
+        blocks.append("")
+    return "\n".join(blocks).rstrip()
 
 
 class WorkflowAgent:
@@ -124,7 +232,14 @@ class WorkflowAgent:
         return {"structured_response": WorkFlowStateModel(**state)}
 
     def invoke_interactive(self, prompt: str) -> dict:
+        _print_header("PromptCraftMan", "提示词工作流优化")
+
+        _print_stage("需求输入", CYAN)
+        _print_kv("原始需求：", prompt)
+
+        _print_stage("问题诊断", MAGENTA)
         diagnosis = _extract_structured_response(self.diagnosis_agent.invoke(prompt))
+        print(_format_list(diagnosis.problems))
 
         qa_records: list[QAReport] = []
         remaining_missing_info = list(diagnosis.missing_info)
@@ -137,6 +252,7 @@ class WorkflowAgent:
             )
             qa_records, remaining_missing_info = _collect_answers_once(clarification.questions)
 
+        _print_stage("提示词优化", GREEN)
         optimization = _extract_structured_response(
             self.optimization_agent.invoke(
                 _build_optimization_context(
@@ -148,6 +264,7 @@ class WorkflowAgent:
             )
         )
 
+        _print_stage("质量评估", BLUE)
         evaluation = _extract_structured_response(
             self.evaluation_agent.invoke(optimization.prompt)
         )
@@ -160,14 +277,18 @@ class WorkflowAgent:
         current_step = "finalize" if next_step == "finalize" else "evaluation"
 
         while True:
-            print("\n当前准备返回的 final_prompt：\n")
-            print(candidate_prompt)
-            print("\n是否需要继续优化？输入 y 继续优化，直接回车或输入其他内容结束。")
-            refine = input("请输入：").strip().lower()
+            print()
+            _print_panel("当前准备返回的 final_prompt", candidate_prompt, GREEN)
+            _print_kv("当前评分：", "未评估" if grade is None else str(grade))
+            _print_kv("评估说明：", evaluation_reason or "无")
+            print()
+            refine = input(
+                _style("是否需要继续优化？输入 y 继续，其它任意输入结束： ", YELLOW, BOLD)
+            ).strip().lower()
             if refine != "y":
                 break
 
-            feedback = input("请说明你希望继续优化的方向：\n请输入：").strip()
+            feedback = input(_style("请说明你希望继续优化的方向： ", YELLOW, BOLD)).strip()
             optimization_retry = _extract_structured_response(
                 self.optimization_agent.invoke(
                     _build_optimization_context(
@@ -209,11 +330,13 @@ class WorkflowAgent:
 
 
 if __name__ == "__main__":
+    user_prompt = input(_style("请输入： ", YELLOW, BOLD))
     workflow_agent = WorkflowAgent()
-    result = workflow_agent.invoke_interactive(input("请输入："))
+    result = workflow_agent.invoke_interactive(user_prompt)
     structured_response = result.get("structured_response")
 
     if structured_response is not None:
-        print(structured_response.model_dump_json(indent=2, ensure_ascii=False))
+        print()
+        _print_panel("处理结果", format_workflow_result(structured_response), CYAN)
     else:
         print(result)
