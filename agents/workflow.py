@@ -1,136 +1,342 @@
-from langchain.agents import create_agent
-from langchain.tools import tool
+import json
+import shutil
+import sys
 
 from agents.clarification import ClarificationAgent
 from agents.diagnosis import DiagnosisAgent
 from agents.evaluation import EvaluationAgent
 from agents.optimization import OptimizationAgent
-from defs.model import WorkFlowStateModel
-from llm.myllm import llm
-
-model = llm
-system_prompt = """
-你是 PromptCraftMan 的 workflow_agent，是 prompt 优化流程的总控与状态汇总模块。
-
-你需要参考四个子 agent 的职责来组织工作流：
-- diagnosis_agent：诊断原始 prompt 的使用场景、主要问题、缺失信息，并判断下一步是 clarification 还是 optimization。
-- clarification_agent：根据 missing_info 生成澄清问题，并在用户提供答案后形成 QA 信息。
-- optimization_agent：结合 original_prompt、problems、missing_info 和 QA，生成更完整、更可执行的候选 prompt，并记录 improved_info。
-- evaluation_agent：评估优化后的 prompt 是否达标；若信息仍不足则回到 diagnosis，若表达仍不够好则回到 optimization，若达标则 finalize。
-
-你的输出必须严格符合 WorkFlowStateModel。不要输出 Markdown、解释文本或额外字段。
-
-流程字段规则：
-- current_step 表示当前工作流已经推进到的阶段，只能是 diagnosis、clarification、optimization、evaluation、finalize。
-- next_step 表示下一步应该进入的阶段，只能是 diagnosis、clarification、optimization、evaluation、finalize。
-- 如果仍需要用户补充关键信息，current_step 通常是 clarification，next_step 通常是 diagnosis 或 optimization。
-- 如果已经生成候选 prompt 但还没完成评估，current_step 是 optimization，next_step 是 evaluation。
-- 如果评估通过，current_step 是 finalize，next_step 也设为 finalize。
-- 如果评估发现信息不足，current_step 是 evaluation，next_step 是 diagnosis。
-- 如果评估发现表达质量不足但信息足够，current_step 是 evaluation，next_step 是 optimization。
-
-内容字段规则：
-- original_prompt：保存用户最初输入的 prompt 原文，不要替换成优化版。
-- problems：汇总 diagnosis_agent 会指出的核心问题，例如目标不清、场景缺失、受众不明、输出格式缺失、约束不足、质量标准缺失。
-- missing_info：列出当前仍需要澄清的关键信息。只列真正影响优化质量的问题，最多 5 条。
-- QA：如果用户输入中已经包含补充说明，将补充说明整理为 question/answer；如果没有答案，不要编造，返回空列表。
-- improved_info：记录 optimization_agent 在最终 prompt 中补强的内容，例如角色设定、任务拆解、上下文、输入要求、输出结构、评价标准、限制条件。
-- grades：记录 evaluation_agent 对候选 prompt 的评分，建议使用 0 到 10 分；如果尚未评估，返回空列表。
-- evaluation_reason：记录 evaluation_agent 的判断理由；如果尚未评估，返回空字符串。
-- final_prompt：输出最终可直接使用的完整 prompt。即使信息不足，也要基于合理假设给出一个可用版本，并用占位符标出未知信息。
-- final_missing_info：列出最终 prompt 中仍依赖用户补充的信息；如果没有明显缺失，返回空列表。
-
-质量要求：
-- final_prompt 要具体、可执行、少歧义，避免只给空泛建议。
-- 不要在 final_prompt 中提到 diagnosis_agent、clarification_agent、optimization_agent 或 evaluation_agent。
-- 不要编造用户没有提供的事实；可以写“请替换为……”或“如果适用，请补充……”。
-- 缺失信息的问题要短、明确、可回答，不要一次问太多。
-""".strip()
+from defs.model import QAReport, WorkFlowStateModel
 
 
-def _dump_structured_response(result: dict, include: set[str]) -> str:
-    structured_response = result["structured_response"]
-    return structured_response.model_dump_json(
-        include=include,
-        ensure_ascii=False,
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+MAGENTA = "\033[35m"
+BLUE = "\033[34m"
+
+
+def _supports_color() -> bool:
+    return sys.stdout.isatty()
+
+
+def _style(text: str, *codes: str) -> str:
+    if not _supports_color():
+        return text
+    return f"{''.join(codes)}{text}{RESET}"
+
+
+def _term_width(default: int = 72) -> int:
+    try:
+        return max(60, min(100, shutil.get_terminal_size((default, 20)).columns))
+    except OSError:
+        return default
+
+
+def _rule(char: str = "─") -> str:
+    return char * _term_width()
+
+
+def _print_header(title: str, subtitle: str | None = None) -> None:
+    print(_style(_rule("═"), CYAN, BOLD))
+    print(_style(title.center(_term_width()), CYAN, BOLD))
+    if subtitle:
+        print(_style(subtitle.center(_term_width()), DIM))
+    print(_style(_rule("═"), CYAN, BOLD))
+
+
+def _print_stage(title: str, tone: str = MAGENTA) -> None:
+    print()
+    print(_style(f"◆ {title}", tone, BOLD))
+    print(_style(_rule("─"), DIM))
+
+
+def _print_kv(label: str, value: str) -> None:
+    print(f"{_style(label, BOLD)} {value}")
+
+
+def _print_panel(title: str, body: str, tone: str = BLUE) -> None:
+    width = _term_width()
+    print(_style(f"┌{'─' * (width - 2)}┐", tone))
+    print(_style(f"│ {title}".ljust(width - 1) + "│", tone, BOLD))
+    print(_style(f"├{'─' * (width - 2)}┤", tone))
+    for line in (body or "").splitlines() or [""]:
+        visible = line[: width - 4]
+        print(_style(f"│ {visible}".ljust(width - 1) + "│", tone))
+    print(_style(f"└{'─' * (width - 2)}┘", tone))
+
+
+def _extract_structured_response(result: dict):
+    structured_response = result.get("structured_response")
+    if structured_response is None:
+        raise ValueError("agent 返回中缺少 structured_response")
+    return structured_response
+
+
+def _build_optimization_context(
+    original_prompt: str,
+    problems: list[str],
+    missing_info: list[str],
+    qa: list[QAReport],
+    evaluation_reason: str = "",
+    optimization_feedback: str = "",
+) -> str:
+    payload = {
+        "original_prompt": original_prompt,
+        "problems": problems,
+        "missing_info": missing_info,
+        "QA": [item.model_dump() for item in qa],
+    }
+    if evaluation_reason:
+        payload["evaluation_reason"] = evaluation_reason
+    if optimization_feedback:
+        payload["optimization_feedback"] = optimization_feedback
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _build_fallback_final_prompt(original_prompt: str, missing_info: list[str]) -> str:
+    if not missing_info:
+        return original_prompt
+
+    placeholders = "\n".join(f"- {item}" for item in missing_info)
+    return (
+        "请基于以下任务生成结果，并在生成前先补全必要信息。\n\n"
+        f"任务：{original_prompt}\n\n"
+        "请补充的信息：\n"
+        f"{placeholders}\n\n"
+        "如果暂时无法补全，请使用明确占位符保留缺失项，并输出一个完整、可执行的最终提示词。"
     )
 
 
-@tool
-def run_diagnosis_agent(prompt: str):
-    """Diagnose the original prompt and return scene, problems, missing info, and next step."""
-    diagnosis_agent = DiagnosisAgent()
-    return _dump_structured_response(
-        diagnosis_agent.invoke(prompt),
-        {"problems", "missing_info", "next_step"},
-    )
+def _collect_answers_once(questions: list[str]) -> tuple[list[QAReport], list[str]]:
+    _print_stage("信息澄清", YELLOW)
+    print("需要补充以下信息：")
+    for index, question in enumerate(questions, start=1):
+        print(f"{index}. {question}")
+
+    print()
+    print("请直接用一段话补充你已知的信息，workflow 会自动识别并继续处理。")
+    user_context = input(_style("请输入补充说明： ", YELLOW, BOLD)).strip()
+    if not user_context:
+        return [], questions
+
+    qa_records = [QAReport(question=question, answer=user_context) for question in questions]
+    return qa_records, []
 
 
-@tool
-def run_clarification_agent(prompt: str):
-    """Generate clarification questions or collect clarification answers from missing information."""
-    clarification_agent = ClarificationAgent()
-    return _dump_structured_response(
-        clarification_agent.invoke(prompt),
-        {"questions"},
-    )
+def _format_list(items: list[str]) -> str:
+    if not items:
+        return "无"
+    return "\n".join(f"- {item}" for item in items)
 
 
-@tool
-def run_optimization_agent(prompt: str):
-    """Optimize the prompt based on the original prompt and clarified information."""
-    optimization_agent = OptimizationAgent()
-    return _dump_structured_response(
-        optimization_agent.invoke(prompt),
-        {"prompts", "improved_info"},
-    )
+def _format_qa(qa_items: list[QAReport]) -> str:
+    if not qa_items:
+        return "无"
+    lines: list[str] = []
+    for index, item in enumerate(qa_items, start=1):
+        lines.append(f"{index}. 问题：{item.question}")
+        lines.append(f"   回答：{item.answer}")
+    return "\n".join(lines)
 
 
-@tool
-def run_evaluation_agent(prompt: str):
-    """Evaluate optimized prompts and decide whether to diagnose, optimize again, or finalize."""
-    evaluation_agent = EvaluationAgent()
-    return _dump_structured_response(
-        evaluation_agent.invoke(prompt),
-        {"grades", "reason", "next_step"},
-    )
-
-
-tools = [
-    run_diagnosis_agent,
-    run_clarification_agent,
-    run_optimization_agent,
-    run_evaluation_agent,
-]
-schema = WorkFlowStateModel
-name = "workflow_agent"
+def format_workflow_result(state: WorkFlowStateModel) -> str:
+    grade_text = "未评估" if state.grade is None else str(state.grade)
+    sections = [
+        ("当前步骤", state.current_step),
+        ("下一步", state.next_step),
+        ("评分", grade_text),
+        ("评估说明", state.evaluation_reason or "无"),
+        ("原始提示词", state.original_prompt),
+        ("诊断问题", _format_list(state.problems)),
+        ("缺失信息", _format_list(state.missing_info)),
+        ("补充问答", _format_qa(state.QA)),
+        ("优化补强点", _format_list(state.improved_info)),
+        ("候选提示词", state.candidate_prompt or "无"),
+        ("最终提示词", state.final_prompt),
+        ("最终仍缺失的信息", _format_list(state.final_missing_info)),
+    ]
+    blocks = [
+        "==============================",
+        "PromptCraftMan 处理结果",
+        "==============================",
+    ]
+    for title, content in sections:
+        blocks.append(f"【{title}】")
+        blocks.append(content)
+        blocks.append("")
+    return "\n".join(blocks).rstrip()
 
 
 class WorkflowAgent:
     def __init__(self):
-        self.model = model
-        self.system_prompt = system_prompt
-        self.tools = tools
-        self.schema = schema
-        self.name = name
-        self.agent = create_agent(
-            model=self.model,
-            system_prompt=self.system_prompt,
-            response_format=self.schema,
-            tools=self.tools,
-            name=self.name,
+        self.diagnosis_agent = DiagnosisAgent()
+        self.clarification_agent = ClarificationAgent()
+        self.optimization_agent = OptimizationAgent()
+        self.evaluation_agent = EvaluationAgent()
+
+    def invoke(self, prompt: str) -> dict:
+        diagnosis = _extract_structured_response(self.diagnosis_agent.invoke(prompt))
+
+        state = {
+            "current_step": "diagnosis",
+            "next_step": diagnosis.next_step,
+            "original_prompt": prompt,
+            "problems": diagnosis.problems,
+            "missing_info": diagnosis.missing_info,
+            "QA": [],
+            "candidate_prompt": "",
+            "improved_info": [],
+            "grade": None,
+            "evaluation_reason": "",
+            "final_prompt": _build_fallback_final_prompt(prompt, diagnosis.missing_info),
+            "final_missing_info": diagnosis.missing_info,
+        }
+
+        if diagnosis.next_step == "clarification" and diagnosis.missing_info:
+            clarification = _extract_structured_response(
+                self.clarification_agent.invoke(
+                    json.dumps({"missing_info": diagnosis.missing_info}, ensure_ascii=False)
+                )
+            )
+            state["current_step"] = "clarification"
+            state["next_step"] = "clarification"
+            state["missing_info"] = clarification.questions
+            state["final_missing_info"] = clarification.questions
+            return {"structured_response": WorkFlowStateModel(**state)}
+
+        optimization = _extract_structured_response(
+            self.optimization_agent.invoke(
+                _build_optimization_context(
+                    original_prompt=prompt,
+                    problems=diagnosis.problems,
+                    missing_info=diagnosis.missing_info,
+                    qa=[],
+                )
+            )
+        )
+        evaluation = _extract_structured_response(
+            self.evaluation_agent.invoke(optimization.prompt)
         )
 
-    def invoke(self, prompt: str):
-        return self.agent.invoke({"messages": prompt})
+        state["current_step"] = "finalize" if evaluation.next_step == "finalize" else "evaluation"
+        state["next_step"] = "finalize" if evaluation.next_step == "finalize" else evaluation.next_step
+        state["candidate_prompt"] = optimization.prompt
+        state["improved_info"] = optimization.improved_info
+        state["grade"] = evaluation.grade
+        state["evaluation_reason"] = evaluation.evaluation_reason
+        state["final_prompt"] = optimization.prompt
+        return {"structured_response": WorkFlowStateModel(**state)}
+
+    def invoke_interactive(self, prompt: str) -> dict:
+        _print_header("PromptCraftMan", "提示词工作流优化")
+
+        _print_stage("需求输入", CYAN)
+        _print_kv("原始需求：", prompt)
+
+        _print_stage("问题诊断", MAGENTA)
+        diagnosis = _extract_structured_response(self.diagnosis_agent.invoke(prompt))
+        print(_format_list(diagnosis.problems))
+
+        qa_records: list[QAReport] = []
+        remaining_missing_info = list(diagnosis.missing_info)
+
+        if diagnosis.next_step == "clarification" and diagnosis.missing_info:
+            clarification = _extract_structured_response(
+                self.clarification_agent.invoke(
+                    json.dumps({"missing_info": diagnosis.missing_info}, ensure_ascii=False)
+                )
+            )
+            qa_records, remaining_missing_info = _collect_answers_once(clarification.questions)
+
+        _print_stage("提示词优化", GREEN)
+        optimization = _extract_structured_response(
+            self.optimization_agent.invoke(
+                _build_optimization_context(
+                    original_prompt=prompt,
+                    problems=diagnosis.problems,
+                    missing_info=remaining_missing_info,
+                    qa=qa_records,
+                )
+            )
+        )
+
+        _print_stage("质量评估", BLUE)
+        evaluation = _extract_structured_response(
+            self.evaluation_agent.invoke(optimization.prompt)
+        )
+
+        candidate_prompt = optimization.prompt
+        improved_info = optimization.improved_info
+        grade = evaluation.grade
+        evaluation_reason = evaluation.evaluation_reason
+        next_step = evaluation.next_step
+        current_step = "finalize" if next_step == "finalize" else "evaluation"
+
+        while True:
+            print()
+            _print_panel("当前准备返回的 final_prompt", candidate_prompt, GREEN)
+            _print_kv("当前评分：", "未评估" if grade is None else str(grade))
+            _print_kv("评估说明：", evaluation_reason or "无")
+            print()
+            refine = input(
+                _style("是否需要继续优化？输入 y 继续，其它任意输入结束： ", YELLOW, BOLD)
+            ).strip().lower()
+            if refine != "y":
+                break
+
+            feedback = input(_style("请说明你希望继续优化的方向： ", YELLOW, BOLD)).strip()
+            optimization_retry = _extract_structured_response(
+                self.optimization_agent.invoke(
+                    _build_optimization_context(
+                        original_prompt=prompt,
+                        problems=diagnosis.problems,
+                        missing_info=remaining_missing_info,
+                        qa=qa_records,
+                        evaluation_reason=evaluation_reason,
+                        optimization_feedback=feedback,
+                    )
+                )
+            )
+            candidate_prompt = optimization_retry.prompt
+            improved_info = optimization_retry.improved_info
+
+            evaluation_retry = _extract_structured_response(
+                self.evaluation_agent.invoke(candidate_prompt)
+            )
+            grade = evaluation_retry.grade
+            evaluation_reason = evaluation_retry.evaluation_reason
+            next_step = evaluation_retry.next_step
+            current_step = "finalize" if next_step == "finalize" else "evaluation"
+
+        state = WorkFlowStateModel(
+            current_step=current_step,
+            next_step="finalize" if next_step == "finalize" else next_step,
+            original_prompt=prompt,
+            problems=diagnosis.problems,
+            missing_info=remaining_missing_info,
+            QA=qa_records,
+            candidate_prompt=candidate_prompt,
+            improved_info=improved_info,
+            grade=grade,
+            evaluation_reason=evaluation_reason,
+            final_prompt=candidate_prompt,
+            final_missing_info=remaining_missing_info,
+        )
+        return {"structured_response": state}
 
 
 if __name__ == "__main__":
+    user_prompt = input(_style("请输入： ", YELLOW, BOLD))
     workflow_agent = WorkflowAgent()
-    result = workflow_agent.invoke(input("请输入："))
+    result = workflow_agent.invoke_interactive(user_prompt)
     structured_response = result.get("structured_response")
 
     if structured_response is not None:
-        print(structured_response.model_dump_json(indent=2))
+        print()
+        _print_panel("处理结果", format_workflow_result(structured_response), CYAN)
     else:
         print(result)
